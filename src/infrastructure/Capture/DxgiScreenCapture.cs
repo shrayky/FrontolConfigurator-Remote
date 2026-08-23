@@ -1,0 +1,214 @@
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using Microsoft.Extensions.Logging;
+using SharpGen.Runtime;
+using Vortice.Direct3D;
+using Vortice.Direct3D11;
+using Vortice.DXGI;
+
+namespace Capture;
+
+public sealed class DxgiScreenCapture : IDisposable
+{
+    private readonly GdiScreenCapture _encoder;
+    private readonly ILogger<DxgiScreenCapture> _logger;
+
+    private ID3D11Device? _device;
+    private ID3D11DeviceContext? _context;
+    private IDXGIOutputDuplication? _duplication;
+    private ID3D11Texture2D? _staging;
+    private int _stagingWidth;
+    private int _stagingHeight;
+    private (int Width, int Height, byte[] Jpeg) _last = (0, 0, []);
+    private bool _initFailed;
+
+    public DxgiScreenCapture(GdiScreenCapture encoder, ILogger<DxgiScreenCapture> logger)
+    {
+        _encoder = encoder;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// True, если Desktop Duplication создана и можно захватывать без GDI.
+    /// </summary>
+    public bool IsReady => _duplication != null;
+
+    /// <summary>
+    /// Захватывает рабочий стол через DXGI. При таймауте кадра возвращает предыдущий JPEG, не блокируясь.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public (int Width, int Height, byte[] Jpeg) Capture()
+    {
+        if (!OperatingSystem.IsWindows() || _initFailed)
+            return (0, 0, []);
+
+        try
+        {
+            if (!EnsureDuplication())
+                return (0, 0, []);
+
+            var result = _duplication!.AcquireNextFrame(80, out _, out var resource);
+            if (result.Failure)
+            {
+                if (result.Code == Vortice.DXGI.ResultCode.WaitTimeout.Code)
+                    return _last;
+
+                if (result.Code == Vortice.DXGI.ResultCode.AccessLost.Code)
+                {
+                    Reset();
+                    return _last;
+                }
+
+                _logger.LogWarning("AcquireNextFrame HRESULT {Code}", result.Code);
+                return _last;
+            }
+
+            try
+            {
+                using var texture = resource.QueryInterface<ID3D11Texture2D>();
+                var desc = texture.Description;
+                if (!Is32Bpp(desc.Format))
+                {
+                    _logger.LogWarning("DXGI-формат {Format} не 32bpp, кадр пропущен", desc.Format);
+                    return _last;
+                }
+
+                EnsureStaging((int)desc.Width, (int)desc.Height, desc.Format);
+                _context!.CopyResource(_staging, texture);
+
+                var mapped = _context.Map(_staging!, 0, MapMode.Read);
+                try
+                {
+                    using var bitmap = ToBitmap(mapped, (int)desc.Width, (int)desc.Height, desc.Format);
+                    _last = _encoder.EncodeDesktopBitmap(bitmap);
+                    return _last;
+                }
+                finally
+                {
+                    _context.Unmap(_staging, 0);
+                }
+            }
+            finally
+            {
+                resource.Dispose();
+                _duplication.ReleaseFrame();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Ошибка DXGI-захвата, сброс duplication");
+            Reset();
+            return _last;
+        }
+    }
+
+    public void Dispose() => Reset();
+
+    [SupportedOSPlatform("windows")]
+    private bool EnsureDuplication()
+    {
+        if (_duplication != null)
+            return true;
+
+        try
+        {
+            using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
+            factory.EnumAdapters1(0, out var adapter);
+            using (adapter)
+            {
+                D3D11.D3D11CreateDevice(
+                    adapter.NativePointer,
+                    DriverType.Unknown,
+                    DeviceCreationFlags.BgraSupport,
+                    [FeatureLevel.Level_11_0, FeatureLevel.Level_10_0],
+                    out _device,
+                    out _context);
+
+                adapter.EnumOutputs(0, out var output);
+                using (output)
+                using (var output1 = output.QueryInterface<IDXGIOutput1>())
+                {
+                    _duplication = output1.DuplicateOutput(_device);
+                }
+            }
+
+            _logger.LogInformation("DXGI Desktop Duplication включён");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _initFailed = true;
+            _logger.LogWarning(ex, "Не удалось создать DXGI Desktop Duplication");
+            Reset();
+            return false;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private void EnsureStaging(int width, int height, Format format)
+    {
+        if (_staging != null && _stagingWidth == width && _stagingHeight == height)
+            return;
+
+        _staging?.Dispose();
+        _staging = _device!.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = format,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Staging,
+            CPUAccessFlags = CpuAccessFlags.Read,
+            BindFlags = BindFlags.None
+        });
+        _stagingWidth = width;
+        _stagingHeight = height;
+    }
+
+    private static bool Is32Bpp(Format format) =>
+        format is Format.B8G8R8A8_UNorm or Format.B8G8R8A8_UNorm_SRgb or Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb;
+
+    [SupportedOSPlatform("windows")]
+    private static Bitmap ToBitmap(MappedSubresource mapped, int width, int height, Format format)
+    {
+        var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        var bits = bitmap.LockBits(
+            new Rectangle(0, 0, width, height),
+            ImageLockMode.WriteOnly,
+            PixelFormat.Format32bppArgb);
+
+        var rowBytes = width * 4;
+        var row = new byte[rowBytes];
+        var swapRb = format is Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb;
+        for (var y = 0; y < height; y++)
+        {
+            Marshal.Copy(IntPtr.Add(mapped.DataPointer, y * (int)mapped.RowPitch), row, 0, rowBytes);
+            if (swapRb)
+            {
+                for (var i = 0; i < rowBytes; i += 4)
+                    (row[i], row[i + 2]) = (row[i + 2], row[i]);
+            }
+
+            Marshal.Copy(row, 0, IntPtr.Add(bits.Scan0, y * bits.Stride), rowBytes);
+        }
+
+        bitmap.UnlockBits(bits);
+        return bitmap;
+    }
+
+    private void Reset()
+    {
+        _duplication?.Dispose();
+        _duplication = null;
+        _staging?.Dispose();
+        _staging = null;
+        _context?.Dispose();
+        _context = null;
+        _device?.Dispose();
+        _device = null;
+    }
+}

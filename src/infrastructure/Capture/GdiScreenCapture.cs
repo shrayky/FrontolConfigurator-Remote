@@ -8,12 +8,15 @@ using Microsoft.Extensions.Logging;
 
 namespace Capture;
 
-public sealed class GdiScreenCapture
+public sealed class GdiScreenCapture : IScreenCapture
 {
     private const int MaxDimension = 1280;
     private const long JpegQuality = 40;
+    private static readonly TimeSpan GdiTimeout = TimeSpan.FromMilliseconds(300);
 
     private readonly ILogger<GdiScreenCapture> _logger;
+    private Task<(int Width, int Height, byte[] Jpeg)>? _inFlight;
+    private (int Width, int Height, byte[] Jpeg) _last = (0, 0, []);
 
     public GdiScreenCapture(ILogger<GdiScreenCapture> logger)
     {
@@ -21,8 +24,7 @@ public sealed class GdiScreenCapture
     }
 
     /// <summary>
-    /// Захватывает основной экран, масштабирует так, чтобы max(ширина, высота) ≤ 1280, и кодирует JPEG качеством 40.
-    /// При ошибке CopyFromScreen (Session 0) возвращает пустой кадр и не падает.
+    /// Захватывает основной экран через GDI. Если CopyFromScreen зависает дольше 300мс, отдаёт предыдущий кадр.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public (int Width, int Height, byte[] Jpeg) Capture()
@@ -30,6 +32,45 @@ public sealed class GdiScreenCapture
         if (!OperatingSystem.IsWindows())
             return (0, 0, []);
 
+        if (_inFlight is { IsCompleted: false })
+            return _last;
+
+        _inFlight = Task.Run(CaptureCore);
+        if (!_inFlight.Wait(GdiTimeout))
+        {
+            _logger.LogWarning("GDI-захват дольше 300мс, отдаём предыдущий кадр");
+            return _last;
+        }
+
+        _last = _inFlight.Result;
+        return _last;
+    }
+
+    /// <summary>
+    /// Рисует курсор, масштабирует и кодирует уже полученный bitmap рабочего стола.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public (int Width, int Height, byte[] Jpeg) EncodeDesktopBitmap(Bitmap source)
+    {
+        DrawCursor(source);
+
+        var (width, height) = ScaleToFit(source.Width, source.Height, MaxDimension);
+        if (width == source.Width && height == source.Height)
+            return (width, height, EncodeJpeg(source));
+
+        using var scaled = new Bitmap(width, height);
+        using (var graphics = Graphics.FromImage(scaled))
+        {
+            graphics.InterpolationMode = InterpolationMode.Bilinear;
+            graphics.DrawImage(source, 0, 0, width, height);
+        }
+
+        return (width, height, EncodeJpeg(scaled));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private (int Width, int Height, byte[] Jpeg) CaptureCore()
+    {
         try
         {
             var srcWidth = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXSCREEN);
@@ -43,20 +84,7 @@ public sealed class GdiScreenCapture
                 graphics.CopyFromScreen(0, 0, 0, 0, new Size(srcWidth, srcHeight));
             }
 
-            DrawCursor(source);
-
-            var (width, height) = ScaleToFit(srcWidth, srcHeight, MaxDimension);
-            if (width == srcWidth && height == srcHeight)
-                return (width, height, EncodeJpeg(source));
-
-            using var scaled = new Bitmap(width, height);
-            using (var graphics = Graphics.FromImage(scaled))
-            {
-                graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                graphics.DrawImage(source, 0, 0, width, height);
-            }
-
-            return (width, height, EncodeJpeg(scaled));
+            return EncodeDesktopBitmap(source);
         }
         catch (Exception ex)
         {

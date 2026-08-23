@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using Domain.RemoteDesktop;
 using Domain.RemoteDesktop.Dto;
 
 namespace Capture;
@@ -6,7 +8,7 @@ namespace Capture;
 public sealed class Win32MouseInput
 {
     /// <summary>
-    /// Перемещает курсор в X*ширина / Y*высота экрана и эмулирует down/up по битовой маске Buttons.
+    /// Ставит курсор через SendInput (абсолютные 0..65535) и эмулирует down/up.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public void Apply(RemotePointer pointer)
@@ -14,29 +16,25 @@ public sealed class Win32MouseInput
         if (!OperatingSystem.IsWindows())
             return;
 
-        var screenWidth = NativeMethods.GetSystemMetrics(NativeMethods.SM_CXSCREEN);
-        var screenHeight = NativeMethods.GetSystemMetrics(NativeMethods.SM_CYSCREEN);
-        if (screenWidth <= 0 || screenHeight <= 0)
-            return;
-
-        var x = (int)(pointer.X * screenWidth);
-        var y = (int)(pointer.Y * screenHeight);
-        NativeMethods.SetCursorPos(x, y);
-
+        var flags = NativeMethods.MOUSEEVENTF_MOVE | NativeMethods.MOUSEEVENTF_ABSOLUTE;
         var ev = pointer.Ev;
-        if (ev is "move")
-            return;
-
-        uint flags = 0;
         if (ev is "down")
-            flags = DownFlags(pointer.Buttons);
+            flags |= DownFlags(pointer.Buttons);
         else if (ev is "up")
-            flags = UpFlags(pointer.Buttons);
+            flags |= UpFlags(pointer.Buttons);
 
-        if (flags == 0)
-            return;
+        var input = new NativeMethods.Input
+        {
+            type = NativeMethods.INPUT_MOUSE,
+            mi = new NativeMethods.MouseInput
+            {
+                dx = SendInputMapping.ToAbsolute(pointer.X),
+                dy = SendInputMapping.ToAbsolute(pointer.Y),
+                dwFlags = flags
+            }
+        };
 
-        NativeMethods.mouse_event(flags, 0, 0, 0, UIntPtr.Zero);
+        NativeMethods.SendInput(1, [input], Marshal.SizeOf<NativeMethods.Input>());
     }
 
     private static uint DownFlags(int buttons)

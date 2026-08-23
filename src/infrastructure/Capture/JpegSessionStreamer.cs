@@ -6,14 +6,14 @@ namespace Capture;
 
 public sealed class JpegSessionStreamer
 {
-    private readonly GdiScreenCapture _capture;
+    private readonly IScreenCapture _capture;
     private readonly ILogger<JpegSessionStreamer> _logger;
     private readonly object _sync = new();
 
     private CancellationTokenSource? _cts;
     private Guid _sessionId;
 
-    public JpegSessionStreamer(GdiScreenCapture capture, ILogger<JpegSessionStreamer> logger)
+    public JpegSessionStreamer(IScreenCapture capture, ILogger<JpegSessionStreamer> logger)
     {
         _capture = capture;
         _logger = logger;

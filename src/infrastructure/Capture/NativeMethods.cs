@@ -8,12 +8,38 @@ internal static class NativeMethods
     public const int SM_CXSCREEN = 0;
     public const int SM_CYSCREEN = 1;
 
+    public const uint MOUSEEVENTF_MOVE = 0x0001;
     public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     public const uint MOUSEEVENTF_LEFTUP = 0x0004;
     public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
     public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
     public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
     public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+    public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+    public const uint INPUT_MOUSE = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MouseInput
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Input
+    {
+        public uint type;
+        private readonly uint _padding;
+        public MouseInput mi;
+    }
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, Input[] pInputs, int cbSize);
 
     public const int CURSOR_SHOWING = 0x00000001;
     public const int DI_NORMAL = 0x0003;
