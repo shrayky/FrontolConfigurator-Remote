@@ -33,7 +33,6 @@ internal static class NativeMethods
     public struct Input
     {
         public uint type;
-        private readonly uint _padding;
         public MouseInput mi;
     }
 

@@ -34,7 +34,7 @@ public sealed class JpegSessionStreamer
     /// <summary>
     /// Запускает цикл захвата экрана и отправки JPEG для сессии (политика ограничивает до ~15 кадр/с).
     /// </summary>
-    public void Start(Guid sessionId, Func<RemoteJpegFrame, CancellationToken, Task> sendFrame)
+    public void Start(Guid sessionId, Func<RemoteJpegFrame, CancellationToken, Task<bool>> sendFrame)
     {
         lock (_sync)
         {
@@ -76,7 +76,7 @@ public sealed class JpegSessionStreamer
 
     private async Task RunAsync(
         Guid sessionId,
-        Func<RemoteJpegFrame, CancellationToken, Task> sendFrame,
+        Func<RemoteJpegFrame, CancellationToken, Task<bool>> sendFrame,
         CancellationToken token)
     {
         var policy = new FrameSendPolicy();
@@ -105,7 +105,7 @@ public sealed class JpegSessionStreamer
 
                 if (policy.ShouldSend(jpeg, utcNow))
                 {
-                    await sendFrame(new RemoteJpegFrame
+                    var sent = await sendFrame(new RemoteJpegFrame
                     {
                         SessionId = sessionId,
                         Width = width,
@@ -113,7 +113,7 @@ public sealed class JpegSessionStreamer
                         Jpeg = jpeg
                     }, token);
 
-                    if (!firstSendLogged)
+                    if (sent && !firstSendLogged)
                     {
                         firstSendLogged = true;
                         _logger.LogInformation(

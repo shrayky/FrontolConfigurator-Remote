@@ -1,5 +1,23 @@
+# Сборка
 bin/
 obj/
+builds/
+
+# Visual Studio / Rider
 .vs/
+.idea/
 *.user
 *.suo
+*.userosscache
+*.DotSettings.user
+
+# Тесты и покрытие
+TestResults/
+*.trx
+coverage*
+*.coverage
+*.coveragexml
+
+# Логи
+*.log
+logs/

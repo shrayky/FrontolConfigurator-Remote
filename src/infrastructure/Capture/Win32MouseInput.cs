@@ -2,10 +2,11 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using Domain.RemoteDesktop;
 using Domain.RemoteDesktop.Dto;
+using Microsoft.Extensions.Logging;
 
 namespace Capture;
 
-public sealed class Win32MouseInput
+public sealed class Win32MouseInput(ILogger<Win32MouseInput> logger)
 {
     /// <summary>
     /// Ставит курсор через SendInput (абсолютные 0..65535) и эмулирует down/up.
@@ -34,7 +35,9 @@ public sealed class Win32MouseInput
             }
         };
 
-        NativeMethods.SendInput(1, [input], Marshal.SizeOf<NativeMethods.Input>());
+        var sent = NativeMethods.SendInput(1, [input], Marshal.SizeOf<NativeMethods.Input>());
+        if (sent == 0)
+            logger.LogWarning("SendInput не применил мышь, код {Error}", Marshal.GetLastWin32Error());
     }
 
     private static uint DownFlags(int buttons)

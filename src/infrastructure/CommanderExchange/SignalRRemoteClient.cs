@@ -2,8 +2,11 @@ using Capture;
 using Domain.Configuration;
 using Domain.RemoteDesktop;
 using Domain.RemoteDesktop.Dto;
+using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
+using System.Net.Http;
 using System.Text.Json;
 
 namespace CommanderExchange;
@@ -20,10 +23,12 @@ public class SignalRRemoteClient
     private readonly JpegSessionStreamer _streamer;
     private readonly Win32MouseInput _mouse;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
+    private readonly SemaphoreSlim _startLock = new(1, 1);
 
     private HubConnection? _connection;
     private string _hubUrl = string.Empty;
     private string _token = string.Empty;
+    private int _sendingFrame;
 
     public SignalRRemoteClient(
         ILogger<SignalRRemoteClient> logger,
@@ -48,62 +53,101 @@ public class SignalRRemoteClient
     /// </summary>
     public async Task StartAsync()
     {
-        _hubUrl = RemoteHubUrl.FromAddress(_parameters.CentralServerSettings.Address);
-        _token = _parameters.CentralServerSettings.Token;
-
-        if (_hubUrl == string.Empty || _token == string.Empty)
+        var phase = ToPhase(_connection);
+        if (!RemoteHubStartPolicy.CanStart(phase))
         {
-            _logger.LogDebug("Нет настроек для подключения к центральному серверу");
+            _logger.LogInformation("StartAsync пропущен, фаза {Phase}", phase);
             return;
         }
 
-        _connection = new HubConnectionBuilder()
-            .WithUrl(_hubUrl)
-            .WithAutomaticReconnect([
-                TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30)
-            ])
-            .Build();
-
-        _connection.On<string>("RemoteRegistered", OnRemoteRegistered);
-        _connection.On<JsonElement>("RemoteSessionStart", OnRemoteSessionStart);
-        _connection.On<JsonElement>("RemoteSessionStop", OnRemoteSessionStop);
-        _connection.On<JsonElement, JsonElement>("RemoteControllerChanged", OnRemoteControllerChanged);
-        _connection.On<RemotePointer>("RemotePointer", OnRemotePointer);
-
-        _connection.Reconnecting += error =>
-        {
-            _logger.LogWarning(error, "Переподключение к SignalR серверу...");
-            return Task.CompletedTask;
-        };
-
-        _connection.Reconnected += connectionId =>
-        {
-            _logger.LogInformation("Переподключено к SignalR серверу. ConnectionId: {ConnectionId}", connectionId);
-            _ = Task.Run(async () => await RegisterRemoteAsync());
-            return Task.CompletedTask;
-        };
-
-        _connection.Closed += async error =>
-        {
-            _logger.LogError(error, "Соединение с SignalR сервером закрыто");
-
-            if (error != null)
-            {
-                await Task.Delay(5000, _cancellationTokenSource.Token);
-                await StartAsync();
-            }
-        };
-
         try
         {
+            await _startLock.WaitAsync(_cancellationTokenSource.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        var connectWatch = Stopwatch.StartNew();
+        try
+        {
+            phase = ToPhase(_connection);
+            if (!RemoteHubStartPolicy.CanStart(phase))
+            {
+                _logger.LogInformation("StartAsync пропущен после lock, фаза {Phase}", phase);
+                return;
+            }
+
+            _hubUrl = RemoteHubUrl.FromAddress(_parameters.CentralServerSettings.Address);
+            _token = _parameters.CentralServerSettings.Token;
+
+            if (_hubUrl == string.Empty || _token == string.Empty)
+            {
+                _logger.LogDebug("Нет настроек для подключения к центральному серверу");
+                return;
+            }
+
+            await DisposeConnectionUnlockedAsync();
+
+            _connection = new HubConnectionBuilder()
+                .WithUrl(_hubUrl, options =>
+                {
+                    options.Transports = HttpTransportType.WebSockets;
+                    options.HttpMessageHandlerFactory = _ => CreateHubHttpHandler();
+                })
+                .WithAutomaticReconnect(RemoteHubConnectPolicy.ReconnectDelays)
+                .Build();
+
+            _connection.HandshakeTimeout = RemoteHubConnectPolicy.HandshakeTimeout;
+            _connection.ServerTimeout = RemoteHubConnectPolicy.ServerTimeout;
+            _connection.KeepAliveInterval = RemoteHubConnectPolicy.KeepAliveInterval;
+
+            _connection.On<string>("RemoteRegistered", OnRemoteRegistered);
+            _connection.On<JsonElement>("RemoteSessionStart", OnRemoteSessionStart);
+            _connection.On<JsonElement>("RemoteSessionStop", OnRemoteSessionStop);
+            _connection.On<JsonElement, JsonElement>("RemoteControllerChanged", OnRemoteControllerChanged);
+            _connection.On<RemotePointer>("RemotePointer", OnRemotePointer);
+
+            _connection.Reconnecting += error =>
+            {
+                _logger.LogWarning(error, "Переподключение к SignalR серверу...");
+                _streamer.Stop();
+                return Task.CompletedTask;
+            };
+
+            _connection.Reconnected += connectionId =>
+            {
+                _logger.LogInformation("Переподключено к SignalR серверу. ConnectionId: {ConnectionId}", connectionId);
+                _ = Task.Run(async () => await RegisterRemoteAsync());
+                return Task.CompletedTask;
+            };
+
+            _connection.Closed += OnConnectionClosed;
+
             await _connection.StartAsync(_cancellationTokenSource.Token);
-            _logger.LogInformation("Подключено к SignalR серверу: {HubUrl}", _hubUrl);
+            _logger.LogInformation(
+                "Подключено к SignalR серверу: {HubUrl} за {ElapsedMs} мс",
+                _hubUrl, connectWatch.ElapsedMilliseconds);
 
             await RegisterRemoteAsync();
         }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Подключение к SignalR отменено за {ElapsedMs} мс: {HubUrl}",
+                connectWatch.ElapsedMilliseconds, _hubUrl);
+        }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Ошибка при подключении к SignalR серверу");
+            _logger.LogError(
+                ex,
+                "Ошибка при подключении к SignalR серверу за {ElapsedMs} мс: {HubUrl}",
+                connectWatch.ElapsedMilliseconds, _hubUrl);
+        }
+        finally
+        {
+            _startLock.Release();
         }
     }
 
@@ -115,29 +159,48 @@ public class SignalRRemoteClient
         _streamer.Stop();
         await _cancellationTokenSource.CancelAsync();
 
-        if (_connection == null)
-            return;
+        var acquired = await _startLock.WaitAsync(TimeSpan.FromSeconds(5));
+        try
+        {
+            await DisposeConnectionUnlockedAsync();
+        }
+        finally
+        {
+            if (acquired)
+                _startLock.Release();
+        }
 
-        await _connection.StopAsync();
-        await _connection.DisposeAsync();
         _logger.LogInformation("Клиент SignalR остановлен");
     }
 
     /// <summary>
-    /// Отправляет JPEG-кадр на хаб Командера методом UploadFrame.
+    /// Отправляет JPEG-кадр на хаб Командера методом UploadFrame без ожидания ответа сервера.
     /// </summary>
-    public async Task UploadFrameAsync(RemoteJpegFrame frame, CancellationToken cancellationToken = default)
+    public async Task<bool> UploadFrameAsync(RemoteJpegFrame frame, CancellationToken cancellationToken = default)
     {
+        if (Interlocked.CompareExchange(ref _sendingFrame, 1, 0) != 0)
+            return false;
+
         try
         {
             if (_connection == null || _connection.State != HubConnectionState.Connected)
-                return;
+                return false;
 
-            await _connection.InvokeAsync("UploadFrame", frame, cancellationToken);
+            await _connection.SendAsync("UploadFrame", frame, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Ошибка отправки JPEG-кадра сессии {SessionId}", frame.SessionId);
+            return false;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _sendingFrame, 0);
         }
     }
 
@@ -149,14 +212,48 @@ public class SignalRRemoteClient
             return;
         }
 
+        var registerWatch = Stopwatch.StartNew();
         try
         {
             await _connection.InvokeAsync("RegisterRemote", _token, _cancellationTokenSource.Token);
+            _logger.LogInformation("RegisterRemote выполнен за {ElapsedMs} мс", registerWatch.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Ошибка при регистрации remote-модуля");
+            _logger.LogError(ex, "Ошибка при регистрации remote-модуля за {ElapsedMs} мс", registerWatch.ElapsedMilliseconds);
         }
+    }
+
+    private async Task OnConnectionClosed(Exception? error)
+    {
+        _logger.LogError(error, "Соединение с SignalR сервером закрыто");
+        if (error == null || _cancellationTokenSource.IsCancellationRequested)
+            return;
+
+        _streamer.Stop();
+        try
+        {
+            await Task.Delay(RemoteHubConnectPolicy.ClosedRetryDelay, _cancellationTokenSource.Token);
+            await StartAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка повторного подключения к SignalR");
+        }
+    }
+
+    private async Task DisposeConnectionUnlockedAsync()
+    {
+        if (_connection == null)
+            return;
+
+        var connection = _connection;
+        _connection = null;
+        connection.Closed -= OnConnectionClosed;
+        await connection.DisposeAsync();
     }
 
     private void OnRemoteRegistered(string token)
@@ -226,6 +323,33 @@ public class SignalRRemoteClient
             _logger.LogError(ex, "Ошибка обработки RemotePointer");
         }
     }
+
+    /// <summary>
+    /// Создаёт HTTP-handler для SignalR: на Windows 7/8 — HTTP/1.1 и TLS 1.2.
+    /// </summary>
+    private static HttpMessageHandler CreateHubHttpHandler()
+    {
+        var sockets = new SocketsHttpHandler
+        {
+            ConnectTimeout = RemoteHubConnectPolicy.ConnectTimeout
+        };
+
+        if (!ForceHttp11MessageHandler.IsRequiredOnThisOs)
+            return sockets;
+
+        return new ForceHttp11MessageHandler(sockets);
+    }
+
+    private static RemoteConnectionPhase ToPhase(HubConnection? connection) =>
+        connection?.State switch
+        {
+            null => RemoteConnectionPhase.None,
+            HubConnectionState.Disconnected => RemoteConnectionPhase.Disconnected,
+            HubConnectionState.Connecting => RemoteConnectionPhase.Connecting,
+            HubConnectionState.Connected => RemoteConnectionPhase.Connected,
+            HubConnectionState.Reconnecting => RemoteConnectionPhase.Reconnecting,
+            _ => RemoteConnectionPhase.Disconnected
+        };
 
     private static bool TryGetSessionId(JsonElement payload, out Guid sessionId)
     {
