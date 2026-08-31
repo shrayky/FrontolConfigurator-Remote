@@ -14,4 +14,10 @@ internal static class ProcessRole
                && list.Contains("--service", StringComparer.OrdinalIgnoreCase)
                && !list.Contains("--desktop", StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Имя роли для строки лога: сторож Session 0 или процесс на столе.
+    /// </summary>
+    public static string LogName(IEnumerable<string> args, int sessionId) =>
+        IsWatchdog(args, sessionId) ? "watchdog" : "desktop";
 }

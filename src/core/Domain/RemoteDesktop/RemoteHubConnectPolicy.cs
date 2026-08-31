@@ -17,4 +17,5 @@ public static class RemoteHubConnectPolicy
     public static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan ServerTimeout = TimeSpan.FromSeconds(90);
     public static readonly TimeSpan ClosedRetryDelay = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan HeartbeatInterval = TimeSpan.FromMinutes(1);
 }

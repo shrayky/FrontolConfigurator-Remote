@@ -23,6 +23,7 @@ public sealed class DxgiScreenCapture : IDisposable
     private int _stagingHeight;
     private (int Width, int Height, byte[] Jpeg) _last = (0, 0, []);
     private bool _initFailed;
+    private bool _lastFrameHasAlphaHoles;
 
     public DxgiScreenCapture(GdiScreenCapture encoder, ILogger<DxgiScreenCapture> logger)
     {
@@ -34,6 +35,11 @@ public sealed class DxgiScreenCapture : IDisposable
     /// True, если Desktop Duplication создана и можно захватывать без GDI.
     /// </summary>
     public bool IsReady => _duplication != null;
+
+    /// <summary>
+    /// True, если в последнем DXGI-кадре много пикселей с A=0 — слой MPO не попал в duplication.
+    /// </summary>
+    public bool LastFrameHasAlphaHoles => _lastFrameHasAlphaHoles;
 
     /// <summary>
     /// Захватывает рабочий стол через DXGI. При таймауте кадра возвращает предыдущий JPEG, не блокируясь.
@@ -82,6 +88,9 @@ public sealed class DxgiScreenCapture : IDisposable
                 try
                 {
                     using var bitmap = ToBitmap(mapped, (int)desc.Width, (int)desc.Height, desc.Format);
+                    if (_lastFrameHasAlphaHoles)
+                        return _last;
+
                     _last = _encoder.EncodeDesktopBitmap(bitmap);
                     return _last;
                 }
@@ -115,7 +124,15 @@ public sealed class DxgiScreenCapture : IDisposable
         try
         {
             using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
-            factory.EnumAdapters1(0, out var adapter);
+            var target = DxgiDuplicationPicker.Pick(ListOutputs(factory));
+            if (target is null)
+            {
+                _initFailed = true;
+                _logger.LogWarning("Нет аппаратного DXGI-выхода на рабочем столе");
+                return false;
+            }
+
+            factory.EnumAdapters1(target.Value.AdapterIndex, out var adapter);
             using (adapter)
             {
                 D3D11.D3D11CreateDevice(
@@ -126,7 +143,7 @@ public sealed class DxgiScreenCapture : IDisposable
                     out _device,
                     out _context);
 
-                adapter.EnumOutputs(0, out var output);
+                adapter.EnumOutputs(target.Value.OutputIndex, out var output);
                 using (output)
                 using (var output1 = output.QueryInterface<IDXGIOutput1>())
                 {
@@ -134,7 +151,10 @@ public sealed class DxgiScreenCapture : IDisposable
                 }
             }
 
-            _logger.LogInformation("DXGI Desktop Duplication включён");
+            _logger.LogInformation(
+                "DXGI Desktop Duplication включён: {Adapter} {Output}",
+                target.Value.AdapterName,
+                target.Value.OutputName);
             return true;
         }
         catch (Exception ex)
@@ -172,8 +192,47 @@ public sealed class DxgiScreenCapture : IDisposable
     private static bool Is32Bpp(Format format) =>
         format is Format.B8G8R8A8_UNorm or Format.B8G8R8A8_UNorm_SRgb or Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb;
 
+    /// <summary>
+    /// Собирает выходы всех адаптеров, чтобы выбрать не WARP и не отключённый монитор.
+    /// </summary>
     [SupportedOSPlatform("windows")]
-    private static Bitmap ToBitmap(MappedSubresource mapped, int width, int height, Format format)
+    private static List<DxgiOutputCandidate> ListOutputs(IDXGIFactory1 factory)
+    {
+        var candidates = new List<DxgiOutputCandidate>();
+        for (uint adapterIndex = 0; factory.EnumAdapters1(adapterIndex, out var adapter).Success; adapterIndex++)
+        {
+            using (adapter)
+            {
+                var adapterDesc = adapter.Description1;
+                var software = adapterDesc.Flags.HasFlag(AdapterFlags.Software);
+                for (uint outputIndex = 0; adapter.EnumOutputs(outputIndex, out var output).Success; outputIndex++)
+                {
+                    using (output)
+                    {
+                        var outputDesc = output.Description;
+                        var rect = outputDesc.DesktopCoordinates;
+                        candidates.Add(new DxgiOutputCandidate(
+                            adapterIndex,
+                            outputIndex,
+                            software,
+                            outputDesc.AttachedToDesktop,
+                            rect.Left,
+                            rect.Top,
+                            adapterDesc.Description ?? "",
+                            outputDesc.DeviceName ?? ""));
+                    }
+                }
+            }
+        }
+
+        return candidates;
+    }
+
+    /// <summary>
+    /// Копирует BGRA в Bitmap, выставляет A=255 и запоминает, есть ли дыры MPO.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private Bitmap ToBitmap(MappedSubresource mapped, int width, int height, Format format)
     {
         var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         var bits = bitmap.LockBits(
@@ -184,6 +243,7 @@ public sealed class DxgiScreenCapture : IDisposable
         var rowBytes = width * 4;
         var row = new byte[rowBytes];
         var swapRb = format is Format.R8G8B8A8_UNorm or Format.R8G8B8A8_UNorm_SRgb;
+        var holes = 0;
         for (var y = 0; y < height; y++)
         {
             Marshal.Copy(IntPtr.Add(mapped.DataPointer, y * (int)mapped.RowPitch), row, 0, rowBytes);
@@ -193,10 +253,12 @@ public sealed class DxgiScreenCapture : IDisposable
                     (row[i], row[i + 2]) = (row[i + 2], row[i]);
             }
 
+            holes += BgraDesktopPixels.FlattenRow(row);
             Marshal.Copy(row, 0, IntPtr.Add(bits.Scan0, y * bits.Stride), rowBytes);
         }
 
         bitmap.UnlockBits(bits);
+        _lastFrameHasAlphaHoles = BgraDesktopPixels.ExceedsHoleThreshold(holes, width * height);
         return bitmap;
     }
 
@@ -210,5 +272,6 @@ public sealed class DxgiScreenCapture : IDisposable
         _context = null;
         _device?.Dispose();
         _device = null;
+        _lastFrameHasAlphaHoles = false;
     }
 }

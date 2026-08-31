@@ -17,6 +17,10 @@ internal static class NativeMethods
     public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
     public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
     public const uint INPUT_MOUSE = 0;
+    public const uint INPUT_KEYBOARD = 1;
+    public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint MAPVK_VK_TO_VSC = 0;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MouseInput
@@ -30,11 +34,32 @@ internal static class NativeMethods
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct KeyboardInput
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct InputUnion
+    {
+        [FieldOffset(0)] public MouseInput mi;
+        [FieldOffset(0)] public KeyboardInput ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct Input
     {
         public uint type;
-        public MouseInput mi;
+        public InputUnion u;
     }
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
     [SupportedOSPlatform("windows")]
     [DllImport("user32.dll", SetLastError = true)]

@@ -22,10 +22,14 @@ public class SignalRRemoteClient
     private readonly Parameters _parameters;
     private readonly JpegSessionStreamer _streamer;
     private readonly Win32MouseInput _mouse;
+    private readonly Win32KeyboardInput _keyboard;
+    private readonly Win32TaskManagerStart _taskManager;
+    private readonly Win32FrontolAdminStart _frontolAdmin;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private readonly SemaphoreSlim _startLock = new(1, 1);
 
     private HubConnection? _connection;
+    private Func<Exception?, Task>? _closedHandler;
     private string _hubUrl = string.Empty;
     private string _token = string.Empty;
     private int _sendingFrame;
@@ -34,12 +38,18 @@ public class SignalRRemoteClient
         ILogger<SignalRRemoteClient> logger,
         Parameters parameters,
         JpegSessionStreamer streamer,
-        Win32MouseInput mouse)
+        Win32MouseInput mouse,
+        Win32KeyboardInput keyboard,
+        Win32TaskManagerStart taskManager,
+        Win32FrontolAdminStart frontolAdmin)
     {
         _logger = logger;
         _parameters = parameters;
         _streamer = streamer;
         _mouse = mouse;
+        _keyboard = keyboard;
+        _taskManager = taskManager;
+        _frontolAdmin = frontolAdmin;
     }
 
     /// <summary>
@@ -47,6 +57,11 @@ public class SignalRRemoteClient
     /// </summary>
     public bool ConnectionUp() =>
         _connection != null && _connection.State == HubConnectionState.Connected;
+
+    /// <summary>
+    /// Текущая фаза хаба для heartbeat.
+    /// </summary>
+    public RemoteConnectionPhase Phase => ToPhase(_connection);
 
     /// <summary>
     /// Подключается к хабу remote и регистрирует модуль по токену агента.
@@ -95,6 +110,8 @@ public class SignalRRemoteClient
                 {
                     options.Transports = HttpTransportType.WebSockets;
                     options.HttpMessageHandlerFactory = _ => CreateHubHttpHandler();
+                    if (ForceHttp11MessageHandler.IsRequiredOnThisOs)
+                        options.WebSocketConfiguration = ForceHttp11MessageHandler.RestrictWebSocket;
                 })
                 .WithAutomaticReconnect(RemoteHubConnectPolicy.ReconnectDelays)
                 .Build();
@@ -108,10 +125,15 @@ public class SignalRRemoteClient
             _connection.On<JsonElement>("RemoteSessionStop", OnRemoteSessionStop);
             _connection.On<JsonElement, JsonElement>("RemoteControllerChanged", OnRemoteControllerChanged);
             _connection.On<RemotePointer>("RemotePointer", OnRemotePointer);
+            _connection.On<RemoteKey>("RemoteKey", OnRemoteKey);
+            _connection.On<RemoteTaskManager>("RemoteTaskManager", OnRemoteTaskManager);
+            _connection.On<RemoteFrontolAdmin>("RemoteFrontolAdmin", OnRemoteFrontolAdmin);
 
             _connection.Reconnecting += error =>
             {
                 _logger.LogWarning(error, "Переподключение к SignalR серверу...");
+                if (OperatingSystem.IsWindows())
+                    _keyboard.ReleaseModifiers();
                 _streamer.Stop();
                 return Task.CompletedTask;
             };
@@ -123,7 +145,12 @@ public class SignalRRemoteClient
                 return Task.CompletedTask;
             };
 
-            _connection.Closed += OnConnectionClosed;
+            _closedHandler = error =>
+            {
+                _ = Task.Run(() => OnConnectionClosed(error));
+                return Task.CompletedTask;
+            };
+            _connection.Closed += _closedHandler;
 
             await _connection.StartAsync(_cancellationTokenSource.Token);
             _logger.LogInformation(
@@ -134,9 +161,19 @@ public class SignalRRemoteClient
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning(
-                "Подключение к SignalR отменено за {ElapsedMs} мс: {HubUrl}",
-                connectWatch.ElapsedMilliseconds, _hubUrl);
+            if (RemoteHubCancelKindPolicy.Classify(_cancellationTokenSource.IsCancellationRequested) ==
+                RemoteHubCancelKind.HostStop)
+            {
+                _logger.LogWarning(
+                    "Подключение к SignalR отменено за {ElapsedMs} мс: {HubUrl}",
+                    connectWatch.ElapsedMilliseconds, _hubUrl);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Таймаут handshake SignalR за {ElapsedMs} мс: {HubUrl}",
+                    connectWatch.ElapsedMilliseconds, _hubUrl);
+            }
         }
         catch (Exception ex)
         {
@@ -252,7 +289,12 @@ public class SignalRRemoteClient
 
         var connection = _connection;
         _connection = null;
-        connection.Closed -= OnConnectionClosed;
+        if (_closedHandler != null)
+        {
+            connection.Closed -= _closedHandler;
+            _closedHandler = null;
+        }
+
         await connection.DisposeAsync();
     }
 
@@ -291,6 +333,8 @@ public class SignalRRemoteClient
             }
 
             _logger.LogInformation("Остановка JPEG-стрима сессии {SessionId}", sessionId);
+            if (OperatingSystem.IsWindows())
+                _keyboard.ReleaseModifiers();
             _streamer.Stop(sessionId);
         }
         catch (Exception ex)
@@ -321,6 +365,78 @@ public class SignalRRemoteClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "Ошибка обработки RemotePointer");
+        }
+    }
+
+    private void OnRemoteKey(RemoteKey key)
+    {
+        try
+        {
+            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+                return;
+
+            _keyboard.Apply(key);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка обработки RemoteKey");
+        }
+    }
+
+    private void OnRemoteTaskManager(RemoteTaskManager request)
+    {
+        try
+        {
+            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+                return;
+
+            _logger.LogInformation("Запуск диспетчера задач, сессия {SessionId}", request.SessionId);
+            _taskManager.Start();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка обработки RemoteTaskManager");
+        }
+    }
+
+    private void OnRemoteFrontolAdmin(RemoteFrontolAdmin request)
+    {
+        try
+        {
+            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+                return;
+
+            _logger.LogInformation("Запуск Frontol Администратор, сессия {SessionId}", request.SessionId);
+            _ = ReportActionResultAsync(_frontolAdmin.Start(request.SessionId));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка обработки RemoteFrontolAdmin");
+            _ = ReportActionResultAsync(new RemoteActionResult
+            {
+                SessionId = request.SessionId,
+                Action = RemoteActionResult.FrontolAdmin,
+                Success = false,
+                Error = ex.Message
+            });
+        }
+    }
+
+    /// <summary>
+    /// Отправляет результат действия в окно оператора.
+    /// </summary>
+    private async Task ReportActionResultAsync(RemoteActionResult result)
+    {
+        try
+        {
+            if (_connection == null || _connection.State != HubConnectionState.Connected)
+                return;
+
+            await _connection.SendAsync("ReportActionResult", result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка отправки ReportActionResult");
         }
     }
 

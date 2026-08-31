@@ -10,6 +10,7 @@ public sealed class ScreenCaptureService : IScreenCapture
     private readonly GdiScreenCapture _gdi;
     private readonly ILogger<ScreenCaptureService> _logger;
     private bool _useDxgi = true;
+    private bool _loggedAlphaHoles;
 
     public ScreenCaptureService(
         DxgiScreenCapture dxgi,
@@ -22,7 +23,7 @@ public sealed class ScreenCaptureService : IScreenCapture
     }
 
     /// <summary>
-    /// Сначала DXGI (не зависает на панели задач), если недоступен — GDI с таймаутом.
+    /// Сначала DXGI (не зависает на панели задач). При альфа-дырах MPO кадр берётся из GDI, DXGI не отключается.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public (int Width, int Height, byte[] Jpeg) Capture()
@@ -34,7 +35,20 @@ public sealed class ScreenCaptureService : IScreenCapture
         {
             var frame = _dxgi.Capture();
             if (_dxgi.IsReady)
+            {
+                if (_dxgi.LastFrameHasAlphaHoles)
+                {
+                    if (!_loggedAlphaHoles)
+                    {
+                        _logger.LogWarning("DXGI-кадр с альфа-дырами, этот кадр через GDI");
+                        _loggedAlphaHoles = true;
+                    }
+
+                    return _gdi.Capture();
+                }
+
                 return frame;
+            }
 
             _useDxgi = false;
             _logger.LogWarning("DXGI недоступен, захват через GDI");

@@ -8,14 +8,14 @@ namespace Domain.Tests;
 public class InputLayoutTests
 {
     [Fact]
-    public void input_только_type_и_mi_без_ручного_padding()
+    public void input_только_type_и_union()
     {
         var fields = typeof(NativeMethods.Input)
             .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         Assert.Equal(2, fields.Length);
         Assert.Contains(fields, field => field.Name == nameof(NativeMethods.Input.type));
-        Assert.Contains(fields, field => field.Name == nameof(NativeMethods.Input.mi));
+        Assert.Contains(fields, field => field.Name == nameof(NativeMethods.Input.u));
     }
 
     [Fact]
@@ -26,9 +26,9 @@ public class InputLayoutTests
     }
 
     [Fact]
-    public void mi_сразу_после_выравнивания_type()
+    public void union_сразу_после_выравнивания_type()
     {
         var expectedOffset = IntPtr.Size == 4 ? 4 : 8;
-        Assert.Equal(expectedOffset, Marshal.OffsetOf<NativeMethods.Input>(nameof(NativeMethods.Input.mi)).ToInt32());
+        Assert.Equal(expectedOffset, Marshal.OffsetOf<NativeMethods.Input>(nameof(NativeMethods.Input.u)).ToInt32());
     }
 }

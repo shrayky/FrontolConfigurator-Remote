@@ -18,6 +18,7 @@
     <ItemGroup>
         <ProjectReference Include="..\..\core\Domain\Domain.csproj" />
         <ProjectReference Include="..\..\infrastructure\Capture\Capture.csproj" />
+        <ProjectReference Include="..\..\infrastructure\CommanderExchange\CommanderExchange.csproj" />
     </ItemGroup>
 
 </Project>

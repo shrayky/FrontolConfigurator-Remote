@@ -27,11 +27,14 @@ public sealed class Win32MouseInput(ILogger<Win32MouseInput> logger)
         var input = new NativeMethods.Input
         {
             type = NativeMethods.INPUT_MOUSE,
-            mi = new NativeMethods.MouseInput
+            u = new NativeMethods.InputUnion
             {
-                dx = SendInputMapping.ToAbsolute(pointer.X),
-                dy = SendInputMapping.ToAbsolute(pointer.Y),
-                dwFlags = flags
+                mi = new NativeMethods.MouseInput
+                {
+                    dx = SendInputMapping.ToAbsolute(pointer.X),
+                    dy = SendInputMapping.ToAbsolute(pointer.Y),
+                    dwFlags = flags
+                }
             }
         };
 

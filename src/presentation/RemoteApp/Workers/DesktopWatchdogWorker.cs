@@ -1,3 +1,4 @@
+using Domain.RemoteDesktop;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RemoteApp.Services;
@@ -22,11 +23,18 @@ internal sealed class DesktopWatchdogWorker(
 
         logger.LogInformation("Сторож рабочего стола запущен. exe={Path}", exe);
 
+        var lastHeartbeat = DateTime.MinValue;
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
                 watchdog.Tick(exe, dir);
+                if (DateTime.UtcNow - lastHeartbeat >= RemoteHubConnectPolicy.HeartbeatInterval)
+                {
+                    logger.LogInformation("Heartbeat сторож");
+                    lastHeartbeat = DateTime.UtcNow;
+                }
+
                 await Task.Delay(Interval, stoppingToken);
             }
         }

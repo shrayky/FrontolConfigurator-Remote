@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Security;
+using System.Net.WebSockets;
 using System.Security.Authentication;
 
 namespace CommanderExchange;
@@ -31,6 +32,17 @@ internal sealed class ForceHttp11MessageHandler : DelegatingHandler
     {
         RestrictToHttp11(request);
         return base.Send(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// Включает путь SignalR через HttpClient (TLS 1.2 с handler).
+    /// ConnectAsync без invoker при HTTP/1.1 игнорирует handler и падает с 0x80090302.
+    /// HTTP/2 здесь только флаг для SignalR; SendAsync всё равно снизит запрос до 1.1.
+    /// </summary>
+    internal static void RestrictWebSocket(ClientWebSocketOptions options)
+    {
+        options.HttpVersion = HttpVersion.Version20;
+        options.HttpVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
     }
 
     /// <summary>

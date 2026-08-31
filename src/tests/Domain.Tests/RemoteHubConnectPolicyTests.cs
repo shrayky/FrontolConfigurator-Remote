@@ -25,4 +25,10 @@ public class RemoteHubConnectPolicyTests
         Assert.True(RemoteHubConnectPolicy.ServerTimeout >= RemoteHubConnectPolicy.KeepAliveInterval * 2);
         Assert.True(RemoteHubConnectPolicy.ServerTimeout > TimeSpan.FromSeconds(30));
     }
+
+    [Fact]
+    public void heartbeat_раз_в_минуту_чтобы_файл_лога_ротировался()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(1), RemoteHubConnectPolicy.HeartbeatInterval);
+    }
 }

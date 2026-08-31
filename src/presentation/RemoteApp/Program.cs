@@ -26,18 +26,25 @@ var logFolder = Path.Combine(
 
 Directory.CreateDirectory(logFolder);
 
+var sessionId = Process.GetCurrentProcess().SessionId;
+var role = ProcessRole.LogName(args, sessionId);
+const string logTemplate = "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] [{Role}:{ProcessId}] {Message:lj}{NewLine}{Exception}";
+
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
-    .WriteTo.Console()
+    .Enrich.WithProperty("Role", role)
+    .Enrich.WithProperty("ProcessId", Environment.ProcessId)
+    .WriteTo.Console(outputTemplate: logTemplate)
     .WriteTo.File(
         Path.Combine(logFolder, "fc-remote-.log"),
         rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 14)
+        retainedFileCountLimit: 14,
+        shared: true,
+        outputTemplate: logTemplate)
     .CreateLogger();
 
 try
 {
-    var sessionId = Process.GetCurrentProcess().SessionId;
     Log.Information("Старт fc-remote. SessionId: {SessionId}", sessionId);
 
     if (ProcessRole.IsWatchdog(args, sessionId))

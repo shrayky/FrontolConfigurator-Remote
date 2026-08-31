@@ -21,4 +21,16 @@ public class ProcessRoleTests
     {
         Assert.False(ProcessRole.IsWatchdog(["--service"], sessionId: 1));
     }
+
+    [Fact]
+    public void имя_роли_сторож_в_session_0()
+    {
+        Assert.Equal("watchdog", ProcessRole.LogName(["--service"], sessionId: 0));
+    }
+
+    [Fact]
+    public void имя_роли_desktop_на_столе()
+    {
+        Assert.Equal("desktop", ProcessRole.LogName(["--service", "--desktop"], sessionId: 1));
+    }
 }
