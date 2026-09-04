@@ -25,6 +25,7 @@ public class SignalRRemoteClient
     private readonly Win32KeyboardInput _keyboard;
     private readonly Win32TaskManagerStart _taskManager;
     private readonly Win32FrontolAdminStart _frontolAdmin;
+    private readonly Win32FrontolDbFolderOpen _frontolDbFolder;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
     private readonly SemaphoreSlim _startLock = new(1, 1);
 
@@ -41,7 +42,8 @@ public class SignalRRemoteClient
         Win32MouseInput mouse,
         Win32KeyboardInput keyboard,
         Win32TaskManagerStart taskManager,
-        Win32FrontolAdminStart frontolAdmin)
+        Win32FrontolAdminStart frontolAdmin,
+        Win32FrontolDbFolderOpen frontolDbFolder)
     {
         _logger = logger;
         _parameters = parameters;
@@ -50,6 +52,7 @@ public class SignalRRemoteClient
         _keyboard = keyboard;
         _taskManager = taskManager;
         _frontolAdmin = frontolAdmin;
+        _frontolDbFolder = frontolDbFolder;
     }
 
     /// <summary>
@@ -111,7 +114,7 @@ public class SignalRRemoteClient
                     options.Transports = HttpTransportType.WebSockets;
                     options.HttpMessageHandlerFactory = _ => CreateHubHttpHandler();
                     if (ForceHttp11MessageHandler.IsRequiredOnThisOs)
-                        options.WebSocketConfiguration = ForceHttp11MessageHandler.RestrictWebSocket;
+                        ForceHttp11MessageHandler.ApplyLegacyOsHubOptions(options, CreateHubHttpHandler);
                 })
                 .WithAutomaticReconnect(RemoteHubConnectPolicy.ReconnectDelays)
                 .Build();
@@ -128,6 +131,7 @@ public class SignalRRemoteClient
             _connection.On<RemoteKey>("RemoteKey", OnRemoteKey);
             _connection.On<RemoteTaskManager>("RemoteTaskManager", OnRemoteTaskManager);
             _connection.On<RemoteFrontolAdmin>("RemoteFrontolAdmin", OnRemoteFrontolAdmin);
+            _connection.On<RemoteFrontolDbFolder>("RemoteFrontolDbFolder", OnRemoteFrontolDbFolder);
 
             _connection.Reconnecting += error =>
             {
@@ -264,10 +268,13 @@ public class SignalRRemoteClient
     private async Task OnConnectionClosed(Exception? error)
     {
         _logger.LogError(error, "Соединение с SignalR сервером закрыто");
-        if (error == null || _cancellationTokenSource.IsCancellationRequested)
+        _streamer.Stop();
+        _logger.LogWarning(
+            "Стрим остановлен из-за закрытия хаба, кадры продолжатся только после нового RemoteSessionStart");
+
+        if (!RemoteHubClosedPolicy.ShouldReconnect(_cancellationTokenSource.IsCancellationRequested))
             return;
 
-        _streamer.Stop();
         try
         {
             await Task.Delay(RemoteHubConnectPolicy.ClosedRetryDelay, _cancellationTokenSource.Token);
@@ -416,6 +423,29 @@ public class SignalRRemoteClient
             {
                 SessionId = request.SessionId,
                 Action = RemoteActionResult.FrontolAdmin,
+                Success = false,
+                Error = ex.Message
+            });
+        }
+    }
+
+    private void OnRemoteFrontolDbFolder(RemoteFrontolDbFolder request)
+    {
+        try
+        {
+            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+                return;
+
+            _logger.LogInformation("Открытие каталога базы Frontol, сессия {SessionId}", request.SessionId);
+            _ = ReportActionResultAsync(_frontolDbFolder.Open(request.SessionId));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка обработки RemoteFrontolDbFolder");
+            _ = ReportActionResultAsync(new RemoteActionResult
+            {
+                SessionId = request.SessionId,
+                Action = RemoteActionResult.FrontolDbFolder,
                 Success = false,
                 Error = ex.Message
             });

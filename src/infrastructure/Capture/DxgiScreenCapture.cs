@@ -2,8 +2,8 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using Domain.RemoteDesktop;
 using Microsoft.Extensions.Logging;
-using SharpGen.Runtime;
 using Vortice.Direct3D;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
@@ -22,7 +22,10 @@ public sealed class DxgiScreenCapture : IDisposable
     private int _stagingWidth;
     private int _stagingHeight;
     private (int Width, int Height, byte[] Jpeg) _last = (0, 0, []);
+    private Task<(int Width, int Height, byte[] Jpeg)>? _inFlight;
     private bool _initFailed;
+    private bool _everReady;
+    private int _createFailures;
     private bool _lastFrameHasAlphaHoles;
 
     public DxgiScreenCapture(GdiScreenCapture encoder, ILogger<DxgiScreenCapture> logger)
@@ -37,12 +40,22 @@ public sealed class DxgiScreenCapture : IDisposable
     public bool IsReady => _duplication != null;
 
     /// <summary>
+    /// True, если DXGI на этой машине недоступен — дальше только GDI.
+    /// </summary>
+    public bool InitFailed => _initFailed;
+
+    /// <summary>
+    /// True, если duplication хотя бы раз поднималась — после ACCESS_LOST можно взять кадр из GDI.
+    /// </summary>
+    public bool EverReady => _everReady;
+
+    /// <summary>
     /// True, если в последнем DXGI-кадре много пикселей с A=0 — слой MPO не попал в duplication.
     /// </summary>
     public bool LastFrameHasAlphaHoles => _lastFrameHasAlphaHoles;
 
     /// <summary>
-    /// Захватывает рабочий стол через DXGI. При таймауте кадра возвращает предыдущий JPEG, не блокируясь.
+    /// Захватывает рабочий стол через DXGI. ACCESS_LOST и зависание DuplicateOutput/Map не блокируют стример.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public (int Width, int Height, byte[] Jpeg) Capture()
@@ -50,24 +63,37 @@ public sealed class DxgiScreenCapture : IDisposable
         if (!OperatingSystem.IsWindows() || _initFailed)
             return (0, 0, []);
 
+        if (_inFlight is { IsCompleted: false })
+            return _last;
+
+        _inFlight = Task.Run(CaptureCore);
+        if (!_inFlight.Wait(DxgiDuplicationRecoverPolicy.CaptureTimeout))
+        {
+            _logger.LogWarning("DXGI-захват дольше 300мс, отдаём предыдущий кадр");
+            return _last;
+        }
+
+        _last = _inFlight.Result;
+        return _last;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private (int Width, int Height, byte[] Jpeg) CaptureCore()
+    {
+        if (!EnsureDuplication())
+            return _last;
+
         try
         {
-            if (!EnsureDuplication())
-                return (0, 0, []);
-
             var result = _duplication!.AcquireNextFrame(80, out _, out var resource);
             if (result.Failure)
             {
                 if (result.Code == Vortice.DXGI.ResultCode.WaitTimeout.Code)
                     return _last;
 
-                if (result.Code == Vortice.DXGI.ResultCode.AccessLost.Code)
-                {
-                    Reset();
-                    return _last;
-                }
-
-                _logger.LogWarning("AcquireNextFrame HRESULT {Code}", result.Code);
+                Reset();
+                if (result.Code != Vortice.DXGI.ResultCode.AccessLost.Code)
+                    _logger.LogWarning("AcquireNextFrame HRESULT {Code}", result.Code);
                 return _last;
             }
 
@@ -151,6 +177,8 @@ public sealed class DxgiScreenCapture : IDisposable
                 }
             }
 
+            _createFailures = 0;
+            _everReady = true;
             _logger.LogInformation(
                 "DXGI Desktop Duplication включён: {Adapter} {Output}",
                 target.Value.AdapterName,
@@ -159,7 +187,8 @@ public sealed class DxgiScreenCapture : IDisposable
         }
         catch (Exception ex)
         {
-            _initFailed = true;
+            _createFailures++;
+            _initFailed = DxgiDuplicationRecoverPolicy.IsPermanentCreateFailure(_everReady, _createFailures);
             _logger.LogWarning(ex, "Не удалось создать DXGI Desktop Duplication");
             Reset();
             return false;

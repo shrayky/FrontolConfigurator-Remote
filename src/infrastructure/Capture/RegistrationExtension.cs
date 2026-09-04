@@ -17,6 +17,7 @@ public static class RegistrationExtension
             services.AddSingleton<Win32KeyboardInput>();
             services.AddSingleton<Win32TaskManagerStart>();
             services.AddSingleton<Win32FrontolAdminStart>();
+            services.AddSingleton<Win32FrontolDbFolderOpen>();
             return services;
         }
 }

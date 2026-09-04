@@ -7,6 +7,8 @@ public class RemoteActionResult
 {
     public const string FrontolAdmin = "frontolAdmin";
 
+    public const string FrontolDbFolder = "frontolDbFolder";
+
     public Guid SessionId { get; set; }
 
     public string Action { get; set; } = string.Empty;

@@ -1,5 +1,5 @@
-using System.Drawing;
 using System.Runtime.Versioning;
+using Domain.RemoteDesktop;
 using Microsoft.Extensions.Logging;
 
 namespace Capture;
@@ -9,8 +9,8 @@ public sealed class ScreenCaptureService : IScreenCapture
     private readonly DxgiScreenCapture _dxgi;
     private readonly GdiScreenCapture _gdi;
     private readonly ILogger<ScreenCaptureService> _logger;
-    private bool _useDxgi = true;
     private bool _loggedAlphaHoles;
+    private bool _loggedDxgiDown;
 
     public ScreenCaptureService(
         DxgiScreenCapture dxgi,
@@ -23,7 +23,7 @@ public sealed class ScreenCaptureService : IScreenCapture
     }
 
     /// <summary>
-    /// Сначала DXGI (не зависает на панели задач). При альфа-дырах MPO кадр берётся из GDI, DXGI не отключается.
+    /// Сначала DXGI. После ACCESS_LOST этот кадр из GDI; если GDI пустой — прошлый DXGI JPEG.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public (int Width, int Height, byte[] Jpeg) Capture()
@@ -31,26 +31,32 @@ public sealed class ScreenCaptureService : IScreenCapture
         if (!OperatingSystem.IsWindows())
             return (0, 0, []);
 
-        if (_useDxgi)
+        if (!_dxgi.InitFailed)
         {
             var frame = _dxgi.Capture();
-            if (_dxgi.IsReady)
-            {
-                if (_dxgi.LastFrameHasAlphaHoles)
-                {
-                    if (!_loggedAlphaHoles)
-                    {
-                        _logger.LogWarning("DXGI-кадр с альфа-дырами, этот кадр через GDI");
-                        _loggedAlphaHoles = true;
-                    }
+            var source = ScreenCaptureRoute.Decide(
+                _dxgi.InitFailed,
+                _dxgi.LastFrameHasAlphaHoles,
+                _dxgi.IsReady,
+                _dxgi.EverReady);
+            if (source == ScreenCaptureSource.Dxgi)
+                return frame;
 
-                    return _gdi.Capture();
+            if (source == ScreenCaptureSource.GdiOneFrame)
+            {
+                if (!_loggedAlphaHoles)
+                {
+                    _logger.LogWarning("DXGI-кадр с альфа-дырами или ACCESS_LOST, этот кадр через GDI");
+                    _loggedAlphaHoles = true;
                 }
 
-                return frame;
+                return ScreenCaptureRoute.PreferLiveThenLast(_gdi.Capture(), frame);
             }
+        }
 
-            _useDxgi = false;
+        if (!_loggedDxgiDown)
+        {
+            _loggedDxgiDown = true;
             _logger.LogWarning("DXGI недоступен, захват через GDI");
         }
 
