@@ -192,7 +192,28 @@ public class SignalRRemoteClient
         }
     }
 
-    public Task RefreshRegistrationAsync() => RegisterRemoteAsync();
+    public async Task RefreshRegistrationAsync()
+    {
+        if (_connection == null || _connection.State != HubConnectionState.Connected)
+        {
+            _logger.LogWarning("Невозможно обновить присутствие remote-модуля: соединение не установлено");
+            return;
+        }
+
+        try
+        {
+            await RemoteRegistrationRefresher.Refresh(
+                () => _connection.InvokeAsync(
+                    "RefreshRemotePresence",
+                    _token,
+                    _cancellationTokenSource.Token),
+                RegisterRemoteAsync);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка при обновлении присутствия remote-модуля");
+        }
+    }
 
     /// <summary>
     /// Останавливает клиент SignalR и освобождает соединение.
