@@ -21,7 +21,9 @@ public class RemoteExchangeWorker : BackgroundService
         {
             _logger.LogInformation("Heartbeat remote: фаза {Phase}", _signalRClient.Phase);
 
-            if (!_signalRClient.ConnectionUp())
+            if (RemoteHubHeartbeatPolicy.ShouldRefreshRegistration(_signalRClient.Phase))
+                await _signalRClient.RefreshRegistrationAsync();
+            else
                 await _signalRClient.StartAsync();
 
             await Task.Delay(RemoteHubConnectPolicy.HeartbeatInterval, stoppingToken);

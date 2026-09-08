@@ -192,6 +192,8 @@ public class SignalRRemoteClient
         }
     }
 
+    public Task RefreshRegistrationAsync() => RegisterRemoteAsync();
+
     /// <summary>
     /// Останавливает клиент SignalR и освобождает соединение.
     /// </summary>
