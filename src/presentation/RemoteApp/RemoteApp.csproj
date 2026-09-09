@@ -6,7 +6,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <AssemblyName>fc-remote</AssemblyName>
         <RootNamespace>RemoteApp</RootNamespace>
-        <Version>1.7.0</Version>
+        <Version>1.8.0</Version>
 
 		<EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
 
