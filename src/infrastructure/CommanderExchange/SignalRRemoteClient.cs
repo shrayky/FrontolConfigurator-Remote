@@ -21,8 +21,10 @@ public class SignalRRemoteClient
     private readonly ILogger<SignalRRemoteClient> _logger;
     private readonly Parameters _parameters;
     private readonly JpegSessionStreamer _streamer;
+    private readonly StreamCaptureSettings _captureSettings;
     private readonly Win32MouseInput _mouse;
     private readonly Win32KeyboardInput _keyboard;
+    private readonly Win32Clipboard _clipboard;
     private readonly Win32TaskManagerStart _taskManager;
     private readonly Win32FrontolAdminStart _frontolAdmin;
     private readonly Win32FrontolDbFolderOpen _frontolDbFolder;
@@ -34,6 +36,7 @@ public class SignalRRemoteClient
     private string _hubUrl = string.Empty;
     private string _token = string.Empty;
     private int _sendingFrame;
+    private CancellationTokenSource? _clipboardCts;
 
     /// <summary>
     /// Последняя начатая сессия: нужна, чтобы возобновить стрим после автопереподключения,
@@ -46,8 +49,10 @@ public class SignalRRemoteClient
         ILogger<SignalRRemoteClient> logger,
         Parameters parameters,
         JpegSessionStreamer streamer,
+        StreamCaptureSettings captureSettings,
         Win32MouseInput mouse,
         Win32KeyboardInput keyboard,
+        Win32Clipboard clipboard,
         Win32TaskManagerStart taskManager,
         Win32FrontolAdminStart frontolAdmin,
         Win32FrontolDbFolderOpen frontolDbFolder)
@@ -55,8 +60,10 @@ public class SignalRRemoteClient
         _logger = logger;
         _parameters = parameters;
         _streamer = streamer;
+        _captureSettings = captureSettings;
         _mouse = mouse;
         _keyboard = keyboard;
+        _clipboard = clipboard;
         _taskManager = taskManager;
         _frontolAdmin = frontolAdmin;
         _frontolDbFolder = frontolDbFolder;
@@ -135,6 +142,8 @@ public class SignalRRemoteClient
             _connection.On<JsonElement>("RemoteSessionStop", OnRemoteSessionStop);
             _connection.On<JsonElement, JsonElement>("RemoteControllerChanged", OnRemoteControllerChanged);
             _connection.On<RemotePointer>("RemotePointer", OnRemotePointer);
+            _connection.On<RemoteStreamSettings>("RemoteStreamSettings", OnRemoteStreamSettings);
+            _connection.On<RemoteClipboard>("RemoteClipboard", OnRemoteClipboard);
             _connection.On<RemoteKey>("RemoteKey", OnRemoteKey);
             _connection.On<RemoteTaskManager>("RemoteTaskManager", OnRemoteTaskManager);
             _connection.On<RemoteFrontolAdmin>("RemoteFrontolAdmin", OnRemoteFrontolAdmin);
@@ -145,6 +154,7 @@ public class SignalRRemoteClient
                 _logger.LogWarning(error, "Переподключение к SignalR серверу...");
                 if (OperatingSystem.IsWindows())
                     _keyboard.ReleaseModifiers();
+                StopClipboardWatch();
                 _streamer.Stop();
                 return Task.CompletedTask;
             };
@@ -231,6 +241,7 @@ public class SignalRRemoteClient
     /// </summary>
     public async Task StopAsync()
     {
+        StopClipboardWatch();
         _streamer.Stop();
         await _cancellationTokenSource.CancelAsync();
 
@@ -306,6 +317,7 @@ public class SignalRRemoteClient
     private async Task OnConnectionClosed(Exception? error)
     {
         _logger.LogError(error, "Соединение с SignalR сервером закрыто");
+        StopClipboardWatch();
         _streamer.Stop();
         _logger.LogWarning(
             "Стрим остановлен из-за закрытия хаба, кадры продолжатся только после нового RemoteSessionStart");
@@ -363,6 +375,8 @@ public class SignalRRemoteClient
                 _persistedSessionId = sessionId;
 
             _streamer.Start(sessionId, UploadFrameAsync);
+            StartClipboardWatch(sessionId);
+            _ = ReportCapabilitiesAsync(sessionId);
         }
         catch (Exception ex)
         {
@@ -384,6 +398,7 @@ public class SignalRRemoteClient
             ClearPersistedSession(sessionId);
             if (OperatingSystem.IsWindows())
                 _keyboard.ReleaseModifiers();
+            StopClipboardWatch();
             _streamer.Stop(sessionId);
         }
         catch (Exception ex)
@@ -432,6 +447,8 @@ public class SignalRRemoteClient
 
         _logger.LogInformation("Возобновление JPEG-стрима сессии {SessionId} после переподключения", sessionId);
         _streamer.Start(sessionId, UploadFrameAsync);
+        StartClipboardWatch(sessionId);
+        _ = ReportCapabilitiesAsync(sessionId);
         await Task.CompletedTask;
     }
 
@@ -459,7 +476,7 @@ public class SignalRRemoteClient
             if (!ShouldApplyInput(pointer.SessionId) || !OperatingSystem.IsWindows())
                 return;
 
-            if (pointer.Ev is not ("down" or "up" or "move"))
+            if (pointer.Ev is not ("down" or "up" or "move" or "wheel"))
                 return;
 
             _mouse.Apply(pointer);
@@ -467,6 +484,39 @@ public class SignalRRemoteClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "Ошибка обработки RemotePointer");
+        }
+    }
+
+    private void OnRemoteStreamSettings(RemoteStreamSettings settings)
+    {
+        try
+        {
+            if (settings == null || !ShouldApplyInput(settings.SessionId))
+                return;
+
+            _captureSettings.Apply(settings);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка обработки RemoteStreamSettings");
+        }
+    }
+
+    private void OnRemoteClipboard(RemoteClipboard clipboard)
+    {
+        try
+        {
+            if (clipboard == null
+                || !ShouldApplyInput(clipboard.SessionId)
+                || !ClipboardTextGuard.IsAllowed(clipboard.Text)
+                || !OperatingSystem.IsWindows())
+                return;
+
+            _clipboard.WriteText(clipboard.Text);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка обработки RemoteClipboard");
         }
     }
 
@@ -562,6 +612,95 @@ public class SignalRRemoteClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "Ошибка отправки ReportActionResult");
+        }
+    }
+
+    private void StartClipboardWatch(Guid sessionId)
+    {
+        StopClipboardWatch();
+        if (OperatingSystem.IsWindows())
+            _clipboard.Arm();
+
+        var cts = new CancellationTokenSource();
+        _clipboardCts = cts;
+        _ = WatchClipboardAsync(sessionId, cts.Token);
+    }
+
+    private void StopClipboardWatch()
+    {
+        _clipboardCts?.Cancel();
+        _clipboardCts = null;
+    }
+
+    private async Task WatchClipboardAsync(Guid sessionId, CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                await Task.Delay(500, token);
+                if (!ShouldApplyInput(sessionId) || !OperatingSystem.IsWindows())
+                    continue;
+
+                var text = _clipboard.ReadIfChanged();
+                if (!ClipboardTextGuard.IsAllowed(text))
+                    continue;
+
+                await UploadClipboardAsync(sessionId, text!);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка опроса буфера сессии {SessionId}", sessionId);
+        }
+    }
+
+    /// <summary>
+    /// Отправляет текст буфера кассы оператору. Содержимое в лог не пишется.
+    /// </summary>
+    private async Task UploadClipboardAsync(Guid sessionId, string text)
+    {
+        try
+        {
+            if (_connection == null || _connection.State != HubConnectionState.Connected)
+                return;
+
+            await _connection.SendAsync("UploadClipboard", new RemoteClipboard
+            {
+                SessionId = sessionId,
+                Text = text
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка отправки буфера сессии {SessionId}", sessionId);
+        }
+    }
+
+    /// <summary>
+    /// Сообщает Командеру, что агент умеет пресеты потока и текстовый буфер: без этого
+    /// окно оператора прячет списки качества и блок буфера.
+    /// </summary>
+    private async Task ReportCapabilitiesAsync(Guid sessionId)
+    {
+        try
+        {
+            if (_connection == null || _connection.State != HubConnectionState.Connected)
+                return;
+
+            await _connection.SendAsync("ReportCapabilities", new RemoteCapabilities
+            {
+                SessionId = sessionId,
+                StreamSettings = true,
+                Clipboard = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Ошибка отправки возможностей сессии {SessionId}", sessionId);
         }
     }
 

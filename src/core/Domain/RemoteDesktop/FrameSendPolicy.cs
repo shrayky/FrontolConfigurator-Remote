@@ -7,8 +7,18 @@ public class FrameSendPolicy
     public static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(67);
     public static readonly TimeSpan KeepaliveInterval = TimeSpan.FromSeconds(1);
 
+    private int _intervalMs = (int)MinInterval.TotalMilliseconds;
     private byte[]? _lastHash;
     private DateTime _lastSend = DateTime.MinValue;
+
+    /// <summary>
+    /// Принимает только интервалы пресетов: другое число оставило бы поток без ограничения.
+    /// </summary>
+    public void SetIntervalMs(int intervalMs)
+    {
+        if (intervalMs is 40 or 67 or 200)
+            _intervalMs = intervalMs;
+    }
 
     /// <summary>
     /// Возвращает true, если JPEG нужно отправить: не пустой, хеш изменился (~15 кадр/с)
@@ -27,7 +37,7 @@ public class FrameSendPolicy
             if (utcNow - _lastSend < KeepaliveInterval)
                 return false;
         }
-        else if (utcNow - _lastSend < MinInterval)
+        else if (utcNow - _lastSend < TimeSpan.FromMilliseconds(_intervalMs))
         {
             return false;
         }

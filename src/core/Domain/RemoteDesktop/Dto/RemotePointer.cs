@@ -7,4 +7,5 @@ public class RemotePointer
     public float Y { get; set; }
     public string Ev { get; set; } = string.Empty;
     public int Buttons { get; set; }
+    public int Delta { get; set; }
 }

@@ -76,4 +76,39 @@ public class FrameSendPolicyTests
         Assert.True(policy.ShouldSend(JpegA, now));
         Assert.True(policy.ShouldSend(JpegA, now.AddSeconds(1)));
     }
+
+    [Fact]
+    public void интервал_200мс_режет_кадр_на_67мс()
+    {
+        var policy = new FrameSendPolicy();
+        policy.SetIntervalMs(200);
+        var now = new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.True(policy.ShouldSend(JpegA, now));
+        Assert.False(policy.ShouldSend(JpegB, now.AddMilliseconds(67)));
+        Assert.True(policy.ShouldSend(JpegB, now.AddMilliseconds(200)));
+    }
+
+    [Fact]
+    public void интервал_40мс_пропускает_следующий_кадр()
+    {
+        var policy = new FrameSendPolicy();
+        policy.SetIntervalMs(40);
+        var now = new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.True(policy.ShouldSend(JpegA, now));
+        Assert.True(policy.ShouldSend(JpegB, now.AddMilliseconds(40)));
+    }
+
+    [Fact]
+    public void чужой_интервал_не_меняется()
+    {
+        var policy = new FrameSendPolicy();
+        policy.SetIntervalMs(16);
+        var now = new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.True(policy.ShouldSend(JpegA, now));
+        Assert.False(policy.ShouldSend(JpegB, now.AddMilliseconds(30)));
+        Assert.True(policy.ShouldSend(JpegB, now.AddMilliseconds(67)));
+    }
 }

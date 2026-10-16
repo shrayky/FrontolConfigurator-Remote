@@ -7,15 +7,17 @@ namespace Capture;
 public sealed class JpegSessionStreamer
 {
     private readonly IScreenCapture _capture;
+    private readonly StreamCaptureSettings _settings;
     private readonly ILogger<JpegSessionStreamer> _logger;
     private readonly object _sync = new();
 
     private CancellationTokenSource? _cts;
     private Guid _sessionId;
 
-    public JpegSessionStreamer(IScreenCapture capture, ILogger<JpegSessionStreamer> logger)
+    public JpegSessionStreamer(IScreenCapture capture, StreamCaptureSettings settings, ILogger<JpegSessionStreamer> logger)
     {
         _capture = capture;
+        _settings = settings;
         _logger = logger;
     }
 
@@ -143,9 +145,13 @@ public sealed class JpegSessionStreamer
         {
             while (!token.IsCancellationRequested)
             {
+                // Пресет читается на каждой итерации: он может смениться на лету, стрим при этом не перезапускается.
+                var intervalMs = _settings.IntervalMs;
+                policy.SetIntervalMs(intervalMs);
+
                 if (!OperatingSystem.IsWindows())
                 {
-                    await Task.Delay(FrameSendPolicy.MinInterval, token);
+                    await Task.Delay(intervalMs, token);
                     continue;
                 }
 
@@ -179,7 +185,7 @@ public sealed class JpegSessionStreamer
                     }
                 }
 
-                await Task.Delay(FrameSendPolicy.MinInterval, token);
+                await Task.Delay(intervalMs, token);
             }
         }
         catch (OperationCanceledException)

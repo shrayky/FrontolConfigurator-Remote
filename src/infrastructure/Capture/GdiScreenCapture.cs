@@ -10,16 +10,16 @@ namespace Capture;
 
 public sealed class GdiScreenCapture : IScreenCapture
 {
-    private const int MaxDimension = 1280;
-    private const long JpegQuality = 40;
     private static readonly TimeSpan GdiTimeout = TimeSpan.FromMilliseconds(300);
 
+    private readonly StreamCaptureSettings _settings;
     private readonly ILogger<GdiScreenCapture> _logger;
     private Task<(int Width, int Height, byte[] Jpeg)>? _inFlight;
     private (int Width, int Height, byte[] Jpeg) _last = (0, 0, []);
 
-    public GdiScreenCapture(ILogger<GdiScreenCapture> logger)
+    public GdiScreenCapture(StreamCaptureSettings settings, ILogger<GdiScreenCapture> logger)
     {
+        _settings = settings;
         _logger = logger;
     }
 
@@ -54,9 +54,9 @@ public sealed class GdiScreenCapture : IScreenCapture
     {
         DrawCursor(source);
 
-        var (width, height) = ScaleToFit(source.Width, source.Height, MaxDimension);
+        var (width, height) = ScaleToFit(source.Width, source.Height, _settings.MaxSide);
         if (width == source.Width && height == source.Height)
-            return (width, height, EncodeJpeg(source));
+            return (width, height, EncodeWithinLimit(source));
 
         using var scaled = new Bitmap(width, height);
         using (var graphics = Graphics.FromImage(scaled))
@@ -65,7 +65,7 @@ public sealed class GdiScreenCapture : IScreenCapture
             graphics.DrawImage(source, 0, 0, width, height);
         }
 
-        return (width, height, EncodeJpeg(scaled));
+        return (width, height, EncodeWithinLimit(scaled));
     }
 
     [SupportedOSPlatform("windows")]
@@ -104,17 +104,44 @@ public sealed class GdiScreenCapture : IScreenCapture
     }
 
     [SupportedOSPlatform("windows")]
-    private static byte[] EncodeJpeg(Bitmap bitmap)
+    private static byte[] EncodeJpeg(Bitmap bitmap, long quality)
     {
         var codec = ImageCodecInfo.GetImageEncoders()
             .First(item => item.FormatID == ImageFormat.Jpeg.Guid);
 
         using var encoderParameters = new EncoderParameters(1);
-        encoderParameters.Param[0] = new EncoderParameter(Encoder.Quality, JpegQuality);
+        encoderParameters.Param[0] = new EncoderParameter(Encoder.Quality, quality);
 
         using var stream = new MemoryStream();
         bitmap.Save(stream, codec, encoderParameters);
         return stream.ToArray();
+    }
+
+    /// <summary>
+    /// Кодирует кадр текущим качеством. Если JPEG длиннее лимита хаба, один раз повторяет с качеством 25.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private byte[] EncodeWithinLimit(Bitmap bitmap)
+    {
+        var jpeg = EncodeJpeg(bitmap, _settings.Quality);
+        if (jpeg.Length <= StreamCaptureSettings.MaxJpegBytes)
+            return jpeg;
+
+        _logger.LogWarning(
+            "JPEG {Bytes} байт длиннее {MaxBytes}, повтор с качеством {Quality}",
+            jpeg.Length,
+            StreamCaptureSettings.MaxJpegBytes,
+            StreamCaptureSettings.FallbackQuality);
+
+        jpeg = EncodeJpeg(bitmap, StreamCaptureSettings.FallbackQuality);
+        if (jpeg.Length <= StreamCaptureSettings.MaxJpegBytes)
+            return jpeg;
+
+        _logger.LogWarning(
+            "JPEG {Bytes} байт всё ещё длиннее {MaxBytes}, кадр не отправляем",
+            jpeg.Length,
+            StreamCaptureSettings.MaxJpegBytes);
+        return [];
     }
 
     /// <summary>

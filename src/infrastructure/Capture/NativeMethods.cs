@@ -15,6 +15,7 @@ internal static class NativeMethods
     public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
     public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
     public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+    public const uint MOUSEEVENTF_WHEEL = 0x0800;
     public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
     public const uint INPUT_MOUSE = 0;
     public const uint INPUT_KEYBOARD = 1;
@@ -130,4 +131,47 @@ internal static class NativeMethods
     [SupportedOSPlatform("windows")]
     [DllImport("gdi32.dll")]
     public static extern bool DeleteObject(IntPtr hObject);
+
+    public const uint CF_UNICODETEXT = 13;
+    public const uint GMEM_MOVEABLE = 0x0002;
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll")]
+    public static extern bool CloseClipboard();
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll")]
+    public static extern bool EmptyClipboard();
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetClipboardData(uint uFormat);
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GlobalAlloc(uint uFlags, nuint dwBytes);
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GlobalLock(IntPtr hMem);
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("kernel32.dll")]
+    public static extern bool GlobalUnlock(IntPtr hMem);
+
+    [SupportedOSPlatform("windows")]
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GlobalFree(IntPtr hMem);
 }

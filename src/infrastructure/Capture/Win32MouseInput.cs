@@ -8,8 +8,11 @@ namespace Capture;
 
 public sealed class Win32MouseInput(ILogger<Win32MouseInput> logger)
 {
+    private int _wheelRemainder;
+
     /// <summary>
     /// Ставит курсор через SendInput (абсолютные 0..65535) и эмулирует down/up.
+    /// Щелчок колеса — отдельная ветка: флаги только WHEEL, а mouseData кратен 120.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public void Apply(RemotePointer pointer)
@@ -24,6 +27,18 @@ public sealed class Win32MouseInput(ILogger<Win32MouseInput> logger)
         else if (ev is "up")
             flags |= UpFlags(pointer.Buttons);
 
+        var mouseData = 0u;
+        if (ev is "wheel")
+        {
+            var (data, remainder) = WheelMapping.Consume(_wheelRemainder, pointer.Delta);
+            _wheelRemainder = remainder;
+            if (data == 0)
+                return;
+
+            flags = NativeMethods.MOUSEEVENTF_WHEEL;
+            mouseData = unchecked((uint)data);
+        }
+
         var input = new NativeMethods.Input
         {
             type = NativeMethods.INPUT_MOUSE,
@@ -33,6 +48,7 @@ public sealed class Win32MouseInput(ILogger<Win32MouseInput> logger)
                 {
                     dx = SendInputMapping.ToAbsolute(pointer.X),
                     dy = SendInputMapping.ToAbsolute(pointer.Y),
+                    mouseData = mouseData,
                     dwFlags = flags
                 }
             }

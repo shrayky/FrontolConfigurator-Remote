@@ -9,12 +9,14 @@ public static class RegistrationExtension
         /// </summary>
         public static IServiceCollection AddScreenCapture(this IServiceCollection services)
         {
+            services.AddSingleton<StreamCaptureSettings>();
             services.AddSingleton<GdiScreenCapture>();
             services.AddSingleton<DxgiScreenCapture>();
             services.AddSingleton<IScreenCapture, ScreenCaptureService>();
             services.AddSingleton<JpegSessionStreamer>();
             services.AddSingleton<Win32MouseInput>();
             services.AddSingleton<Win32KeyboardInput>();
+            services.AddSingleton<Win32Clipboard>();
             services.AddSingleton<Win32TaskManagerStart>();
             services.AddSingleton<Win32FrontolAdminStart>();
             services.AddSingleton<Win32FrontolDbFolderOpen>();
