@@ -32,18 +32,42 @@ public sealed class JpegSessionStreamer
     }
 
     /// <summary>
+    /// Сессия, кадры которой отправляются сейчас. Guid.Empty — стрим остановлен.
+    /// </summary>
+    public Guid ActiveSessionId
+    {
+        get
+        {
+            lock (_sync)
+                return _cts is { IsCancellationRequested: false } ? _sessionId : Guid.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Идёт ли стрим именно этой сессии: по этому признаку принимается ввод.
+    /// </summary>
+    public bool IsSessionActive(Guid sessionId)
+    {
+        lock (_sync)
+            return _cts is { IsCancellationRequested: false } && _sessionId == sessionId;
+    }
+
+    /// <summary>
     /// Запускает цикл захвата экрана и отправки JPEG для сессии (политика ограничивает до ~15 кадр/с).
     /// </summary>
     public void Start(Guid sessionId, Func<RemoteJpegFrame, CancellationToken, Task<bool>> sendFrame)
     {
+        CancellationTokenSource cts;
         lock (_sync)
         {
             CancelUnlocked();
             _sessionId = sessionId;
-            _cts = new CancellationTokenSource();
-            var token = _cts.Token;
-            _ = Task.Run(() => RunAsync(sessionId, sendFrame, token), token);
+            cts = new CancellationTokenSource();
+            _cts = cts;
         }
+
+        var token = cts.Token;
+        _ = Task.Run(() => RunAsync(sessionId, sendFrame, token, cts), token);
     }
 
     /// <summary>
@@ -74,14 +98,47 @@ public sealed class JpegSessionStreamer
         _cts = null;
     }
 
+    /// <summary>
+    /// Сбрасывает состояние, когда цикл кадров завершился сам (в том числе из-за ошибки):
+    /// иначе IsRunning и ActiveSessionId продолжали бы врать, и агент принимал бы ввод
+    /// при отсутствии кадров. Сбрасываем только если стрим не перезапустили на другую сессию.
+    /// </summary>
+    private void EndSession(Guid sessionId, CancellationTokenSource cts, bool faulted, Exception? error)
+    {
+        lock (_sync)
+        {
+            if (_cts != cts)
+                return;
+
+            _cts = null;
+            _sessionId = Guid.Empty;
+            cts.Cancel();
+        }
+
+        if (faulted)
+        {
+            _logger.LogError(
+                error,
+                "Стрим JPEG сессии {SessionId} аварийно завершён, ввод более не принимается",
+                sessionId);
+        }
+        else
+        {
+            _logger.LogInformation("Стрим JPEG сессии {SessionId} остановлен", sessionId);
+        }
+    }
+
     private async Task RunAsync(
         Guid sessionId,
         Func<RemoteJpegFrame, CancellationToken, Task<bool>> sendFrame,
-        CancellationToken token)
+        CancellationToken token,
+        CancellationTokenSource cts)
     {
         var policy = new FrameSendPolicy();
         var lastEmptyLog = DateTime.MinValue;
         var firstSendLogged = false;
+        var faulted = false;
+        Exception? failure = null;
         try
         {
             while (!token.IsCancellationRequested)
@@ -130,7 +187,13 @@ public sealed class JpegSessionStreamer
         }
         catch (Exception ex)
         {
+            faulted = true;
+            failure = ex;
             _logger.LogError(ex, "Ошибка стрима JPEG сессии {SessionId}", sessionId);
+        }
+        finally
+        {
+            EndSession(sessionId, cts, faulted, failure);
         }
     }
 }

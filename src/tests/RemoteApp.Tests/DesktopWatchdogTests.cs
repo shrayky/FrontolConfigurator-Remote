@@ -76,12 +76,15 @@ public class DesktopWatchdogTests
     {
         public uint CurrentSessionId { get; set; }
         public uint? ConsoleSessionId { get; set; }
+        public bool RunningAsSystem { get; set; } = true;
         public int InSessionStarts { get; private set; }
         public uint LastSessionId { get; private set; }
         public string? LastArguments { get; private set; }
         public int Killed { get; private set; }
 
         public uint CurrentProcessSessionId() => CurrentSessionId;
+
+        public bool IsRunningAsSystem() => RunningAsSystem;
 
         public bool TryGetActiveConsoleSessionId(out uint sessionId)
         {

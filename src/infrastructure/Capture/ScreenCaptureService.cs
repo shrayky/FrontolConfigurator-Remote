@@ -31,6 +31,9 @@ public sealed class ScreenCaptureService : IScreenCapture
         if (!OperatingSystem.IsWindows())
             return (0, 0, []);
 
+        if (_dxgi.InitFailed)
+            _dxgi.TryScheduleReProbe();
+
         if (!_dxgi.InitFailed)
         {
             var frame = _dxgi.Capture();
@@ -40,7 +43,10 @@ public sealed class ScreenCaptureService : IScreenCapture
                 _dxgi.IsReady,
                 _dxgi.EverReady);
             if (source == ScreenCaptureSource.Dxgi)
+            {
+                _loggedDxgiDown = false;
                 return frame;
+            }
 
             if (source == ScreenCaptureSource.GdiOneFrame)
             {

@@ -35,6 +35,13 @@ public class SignalRRemoteClient
     private string _token = string.Empty;
     private int _sendingFrame;
 
+    /// <summary>
+    /// Последняя начатая сессия: нужна, чтобы возобновить стрим после автопереподключения,
+    /// когда сервер не присылает RemoteSessionStart повторно.
+    /// </summary>
+    private readonly object _sessionSync = new();
+    private Guid _persistedSessionId = Guid.Empty;
+
     public SignalRRemoteClient(
         ILogger<SignalRRemoteClient> logger,
         Parameters parameters,
@@ -145,7 +152,11 @@ public class SignalRRemoteClient
             _connection.Reconnected += connectionId =>
             {
                 _logger.LogInformation("Переподключено к SignalR серверу. ConnectionId: {ConnectionId}", connectionId);
-                _ = Task.Run(async () => await RegisterRemoteAsync());
+                _ = Task.Run(async () =>
+                {
+                    await RegisterRemoteAsync();
+                    await TryResumeSessionAsync();
+                });
                 return Task.CompletedTask;
             };
 
@@ -259,7 +270,11 @@ public class SignalRRemoteClient
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Ошибка отправки JPEG-кадра сессии {SessionId}", frame.SessionId);
+            _logger.LogError(
+                ex,
+                "Ошибка отправки JPEG-кадра сессии {SessionId}: {Message}",
+                frame.SessionId,
+                ex.Message);
             return false;
         }
         finally
@@ -344,6 +359,9 @@ public class SignalRRemoteClient
             }
 
             _logger.LogInformation("Старт JPEG-стрима сессии {SessionId}", sessionId);
+            lock (_sessionSync)
+                _persistedSessionId = sessionId;
+
             _streamer.Start(sessionId, UploadFrameAsync);
         }
         catch (Exception ex)
@@ -363,6 +381,7 @@ public class SignalRRemoteClient
             }
 
             _logger.LogInformation("Остановка JPEG-стрима сессии {SessionId}", sessionId);
+            ClearPersistedSession(sessionId);
             if (OperatingSystem.IsWindows())
                 _keyboard.ReleaseModifiers();
             _streamer.Stop(sessionId);
@@ -372,6 +391,59 @@ public class SignalRRemoteClient
             _logger.LogError(ex, "Ошибка обработки RemoteSessionStop");
         }
     }
+
+    /// <summary>
+    /// Забывает сессию, если сервер закрыл именно её (сессию могли уже заменить новой).
+    /// </summary>
+    private void ClearPersistedSession(Guid sessionId)
+    {
+        lock (_sessionSync)
+        {
+            if (_persistedSessionId == sessionId)
+                _persistedSessionId = Guid.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Возобновляет стрим последней сессии после автопереподключения: до этого кадры
+    /// возобновлялись только по новому RemoteSessionStart, и оператор видел чёрный экран.
+    /// Если сервер уже завершил сессию, кадры будут отвергнуты — это видно по ошибкам отправки.
+    /// </summary>
+    private async Task TryResumeSessionAsync()
+    {
+        Guid sessionId;
+        lock (_sessionSync)
+            sessionId = _persistedSessionId;
+
+        if (sessionId == Guid.Empty)
+            return;
+
+        if (_streamer.IsRunning)
+        {
+            _logger.LogInformation("Стрим сессии {SessionId} уже идёт, возобновление не требуется", sessionId);
+            return;
+        }
+
+        if (_connection == null || _connection.State != HubConnectionState.Connected)
+        {
+            _logger.LogWarning("Не удалось возобновить стрим сессии {SessionId}: соединение не установлено", sessionId);
+            return;
+        }
+
+        _logger.LogInformation("Возобновление JPEG-стрима сессии {SessionId} после переподключения", sessionId);
+        _streamer.Start(sessionId, UploadFrameAsync);
+        await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Принимать ли ввод: стрим должен быть жив и события должны принадлежать активной сессии,
+    /// иначе ввод прошлой или чужой сессии попадёт на кассу.
+    /// </summary>
+    private bool ShouldApplyInput(Guid sessionId) =>
+        RemoteInputAcceptancePolicy.ShouldApply(
+            _streamer.IsRunning,
+            _streamer.ActiveSessionId,
+            sessionId);
 
     private void OnRemoteControllerChanged(JsonElement sessionId, JsonElement controllerUserLogin)
     {
@@ -384,7 +456,7 @@ public class SignalRRemoteClient
     {
         try
         {
-            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+            if (!ShouldApplyInput(pointer.SessionId) || !OperatingSystem.IsWindows())
                 return;
 
             if (pointer.Ev is not ("down" or "up" or "move"))
@@ -402,7 +474,7 @@ public class SignalRRemoteClient
     {
         try
         {
-            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+            if (!ShouldApplyInput(key.SessionId) || !OperatingSystem.IsWindows())
                 return;
 
             _keyboard.Apply(key);
@@ -417,7 +489,7 @@ public class SignalRRemoteClient
     {
         try
         {
-            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+            if (!ShouldApplyInput(request.SessionId) || !OperatingSystem.IsWindows())
                 return;
 
             _logger.LogInformation("Запуск диспетчера задач, сессия {SessionId}", request.SessionId);
@@ -433,7 +505,7 @@ public class SignalRRemoteClient
     {
         try
         {
-            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+            if (!ShouldApplyInput(request.SessionId) || !OperatingSystem.IsWindows())
                 return;
 
             _logger.LogInformation("Запуск Frontol Администратор, сессия {SessionId}", request.SessionId);
@@ -456,7 +528,7 @@ public class SignalRRemoteClient
     {
         try
         {
-            if (!_streamer.IsRunning || !OperatingSystem.IsWindows())
+            if (!ShouldApplyInput(request.SessionId) || !OperatingSystem.IsWindows())
                 return;
 
             _logger.LogInformation("Открытие каталога базы Frontol, сессия {SessionId}", request.SessionId);

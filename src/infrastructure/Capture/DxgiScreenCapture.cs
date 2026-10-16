@@ -28,6 +28,11 @@ public sealed class DxgiScreenCapture : IDisposable
     private int _createFailures;
     private bool _lastFrameHasAlphaHoles;
 
+    /// <summary>
+    /// Монотонная метка последней попытки поднять DXGI — ограничивает повторные пробы.
+    /// </summary>
+    private long _lastProbeTicks = Environment.TickCount64;
+
     public DxgiScreenCapture(GdiScreenCapture encoder, ILogger<DxgiScreenCapture> logger)
     {
         _encoder = encoder;
@@ -40,7 +45,7 @@ public sealed class DxgiScreenCapture : IDisposable
     public bool IsReady => _duplication != null;
 
     /// <summary>
-    /// True, если DXGI на этой машине недоступен — дальше только GDI.
+    /// True, если DXGI на этой машине недоступен — до следующей повторной пробы.
     /// </summary>
     public bool InitFailed => _initFailed;
 
@@ -60,7 +65,7 @@ public sealed class DxgiScreenCapture : IDisposable
     [SupportedOSPlatform("windows")]
     public (int Width, int Height, byte[] Jpeg) Capture()
     {
-        if (!OperatingSystem.IsWindows() || _initFailed)
+        if (!OperatingSystem.IsWindows() || (_initFailed && !TryScheduleReProbe()))
             return (0, 0, []);
 
         if (_inFlight is { IsCompleted: false })
@@ -75,6 +80,25 @@ public sealed class DxgiScreenCapture : IDisposable
 
         _last = _inFlight.Result;
         return _last;
+    }
+
+    /// <summary>
+    /// Разрешает ещё одну попытку поднять DXGI, если прошло достаточно времени.
+    /// Отказ был постоянным только по счётчику неудач; пробуем снова, потому что причина
+    /// обычно временная (загрузка, RDP, сброс драйвера, защищённый стол).
+    /// Повторный вызов в одном кадре безвреден: проба ограничена по времени.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public bool TryScheduleReProbe()
+    {
+        if (!DxgiReProbePolicy.ShouldProbe(_initFailed, Environment.TickCount64, _lastProbeTicks))
+            return false;
+
+        _lastProbeTicks = Environment.TickCount64;
+        _initFailed = false;
+        _createFailures = 0;
+        _logger.LogInformation("Повторная попытка поднять DXGI Desktop Duplication");
+        return true;
     }
 
     [SupportedOSPlatform("windows")]
@@ -179,6 +203,7 @@ public sealed class DxgiScreenCapture : IDisposable
 
             _createFailures = 0;
             _everReady = true;
+            _lastProbeTicks = Environment.TickCount64;
             _logger.LogInformation(
                 "DXGI Desktop Duplication включён: {Adapter} {Output}",
                 target.Value.AdapterName,
